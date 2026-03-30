@@ -8,7 +8,7 @@ from app.agents.base import BaseAgent
 from app.config import settings, PROJECT_REGISTRY
 from app.database import async_session
 from app.engine.rules import ALL_RULES, ProjectMetrics, Rule
-from app.engine.scoring import calculate_portfolio_score
+from app.engine.scoring import calculate_portfolio_score, evaluate_signal_with_hysteresis
 from app.models.decision import Decision
 from app.models.health_check import HealthCheck
 from app.models.metric_snapshot import MetricSnapshot
@@ -37,6 +37,8 @@ class EstrategaAgent(BaseAgent):
     def __init__(self):
         super().__init__()
         self._last_rule_fire: dict[str, datetime] = {}  # "rule_id:slug" -> last fire time
+        self._score_history: dict[str, list[float]] = {}  # slug -> last N scores
+        self._current_signals: dict[str, str] = {}  # slug -> current signal (HOLD/SCALE/KILL)
         self._last_strategic_cycle: datetime | None = None
 
     def _is_on_cooldown(self, rule: Rule, slug: str) -> bool:
@@ -161,7 +163,20 @@ class EstrategaAgent(BaseAgent):
                 false_positive_rate=metrics.false_positive_rate,
             )
 
-            logger.info("Portfolio score", project=project.slug, score=score)
+            # Track score history and apply hysteresis
+            if project.slug not in self._score_history:
+                self._score_history[project.slug] = []
+            self._score_history[project.slug].append(score)
+            # Keep last 10 scores
+            self._score_history[project.slug] = self._score_history[project.slug][-10:]
+
+            current_signal = self._current_signals.get(project.slug, "HOLD")
+            signal = evaluate_signal_with_hysteresis(
+                score, self._score_history[project.slug], current_signal,
+            )
+            self._current_signals[project.slug] = signal
+
+            logger.info("Portfolio score", project=project.slug, score=score, signal=signal)
 
             # Evaluate rules
             for rule in ALL_RULES:
@@ -178,6 +193,12 @@ class EstrategaAgent(BaseAgent):
 
                 result = rule.evaluate(metrics)
                 if not result.fired:
+                    continue
+
+                # Hysteresis guard: suppress SCALE if signal is not SCALE, suppress KILL if signal is not KILL
+                if result.decision_type == "SCALE" and signal != "SCALE":
+                    continue
+                if result.decision_type == "KILL" and signal != "KILL" and rule.id != "UNIV_HEALTH_DEAD":
                     continue
 
                 # Check if human approval is needed
