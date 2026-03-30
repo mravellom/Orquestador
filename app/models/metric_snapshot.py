@@ -30,5 +30,8 @@ class MetricSnapshot(Base):
     items_processed: Mapped[int | None] = mapped_column(Integer, nullable=True)
     false_positive_rate: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
 
+    # Focus cost
+    focus_hours_weekly: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
+
     # Raw extras
     raw_data: Mapped[dict] = mapped_column(JSONB, default=dict)

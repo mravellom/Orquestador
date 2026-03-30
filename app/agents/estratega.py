@@ -22,9 +22,22 @@ class EstrategaAgent(BaseAgent):
     cadence_seconds = settings.estratega_cadence_minutes * 60
     publish_channel = "orq:decisions"
 
+    # Tactical rules: fast-response, evaluated every cycle (~10 min)
+    TACTICAL_RULE_IDS = frozenset({
+        "UNIV_HEALTH_DEAD",
+        "ACC_CIRCUIT_BREAKER",
+        "ACC_DAILY_LOSS",
+        "FIN_DRAWDOWN",
+        "UNIV_BUDGET_EXCEEDED",
+    })
+
+    # Strategic rules: need time to be meaningful, evaluated every 6 hours
+    STRATEGIC_CADENCE_HOURS = 6
+
     def __init__(self):
         super().__init__()
         self._last_rule_fire: dict[str, datetime] = {}  # "rule_id:slug" -> last fire time
+        self._last_strategic_cycle: datetime | None = None
 
     def _is_on_cooldown(self, rule: Rule, slug: str) -> bool:
         key = f"{rule.id}:{slug}"
@@ -123,6 +136,16 @@ class EstrategaAgent(BaseAgent):
             )
             projects = result.scalars().all()
 
+        # Determine whether strategic rules should run this cycle
+        now = datetime.utcnow()
+        run_strategic = (
+            self._last_strategic_cycle is None
+            or (now - self._last_strategic_cycle).total_seconds()
+            >= self.STRATEGIC_CADENCE_HOURS * 3600
+        )
+        if run_strategic:
+            logger.info("Strategic evaluation due — running full rule set")
+
         for project in projects:
             metrics = await self._build_metrics(project)
 
@@ -142,6 +165,11 @@ class EstrategaAgent(BaseAgent):
 
             # Evaluate rules
             for rule in ALL_RULES:
+                # Tier filter: always run tactical; only run strategic when due
+                is_tactical = rule.id in self.TACTICAL_RULE_IDS
+                if not is_tactical and not run_strategic:
+                    continue
+
                 if "*" not in rule.applies_to and project.slug not in rule.applies_to:
                     continue
 
@@ -192,3 +220,7 @@ class EstrategaAgent(BaseAgent):
                     confidence=result.confidence,
                     rule=rule.id,
                 )
+
+        # Mark strategic cycle as complete so next one fires after STRATEGIC_CADENCE_HOURS
+        if run_strategic:
+            self._last_strategic_cycle = datetime.utcnow()

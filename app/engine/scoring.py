@@ -10,6 +10,7 @@ def calculate_portfolio_score(
     revenue_usd: float | None,
     items_processed: int | None,
     false_positive_rate: float | None,
+    focus_hours_weekly: float | None = None,
 ) -> float:
     """
     Composite score: health(15%) + financial(35%) + momentum(25%) + efficiency(15%) + risk(10%)
@@ -69,4 +70,60 @@ def calculate_portfolio_score(
         + risk_score * 0.10
     )
 
+    # Focus cost penalty: each hour/week of your time costs score points
+    if focus_hours_weekly is not None and focus_hours_weekly > 0:
+        # More than 5h/week on a single MVP is expensive
+        focus_penalty = max(0, (focus_hours_weekly - 2) * 3)  # 3 points per hour above 2h
+        score -= focus_penalty
+
     return round(max(0, min(100, score)), 1)
+
+
+def evaluate_signal_with_hysteresis(
+    current_score: float,
+    score_history: list[float],
+    current_signal: str,
+) -> str:
+    """
+    Apply hysteresis to prevent oscillating decisions.
+
+    Zones:
+    - SCALE: score > 75 for 2+ consecutive cycles
+    - KILL:  score < 25 for 3+ consecutive cycles
+    - HOLD:  between 30-70
+    - DEAD ZONE: 25-30 and 70-75 (no change, keep previous signal)
+
+    Args:
+        current_score: latest portfolio score (0-100)
+        score_history: last N scores (newest last), at least 3 entries
+        current_signal: the current signal for this project ("HOLD", "SCALE", "KILL")
+
+    Returns:
+        New signal: "SCALE", "HOLD", or "KILL"
+    """
+    if len(score_history) < 2:
+        # Not enough history, use simple thresholds
+        if current_score > 75:
+            return "SCALE"
+        elif current_score < 25:
+            return "KILL"
+        return "HOLD"
+
+    # Check SCALE: > 75 for last 2 cycles
+    if len(score_history) >= 2 and all(s > 75 for s in score_history[-2:]):
+        return "SCALE"
+
+    # Check KILL: < 25 for last 3 cycles
+    if len(score_history) >= 3 and all(s < 25 for s in score_history[-3:]):
+        return "KILL"
+
+    # Clear HOLD zone
+    if 30 <= current_score <= 70:
+        return "HOLD"
+
+    # Dead zones (25-30, 70-75): maintain previous signal
+    if 25 <= current_score <= 30 or 70 <= current_score <= 75:
+        return current_signal
+
+    # Fallback
+    return "HOLD"

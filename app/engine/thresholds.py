@@ -25,6 +25,8 @@ PROJECT_THRESHOLDS = {
         "min_ideas_per_week": 10,
         "min_top_score": 70,
         "eval_window_hours": 720,
+        "is_research_lab": True,  # No financial rules, no KILL
+        "max_focus_hours_weekly": 3,  # R&D should be low-maintenance
     },
     "casas": {
         "max_false_positive_rate": 40,

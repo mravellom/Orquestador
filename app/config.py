@@ -131,10 +131,11 @@ PROJECT_REGISTRY: list[ProjectConfig] = [
             "deploy": "/api/deploy/status",
         },
     ),
+    # R&D project - no financial rules apply, only output metrics
     ProjectConfig(
         slug="ideas",
         name="GeneradorDeIdeasMuertas",
-        business_model="research",
+        business_model="research_lab",
         base_url="http://host.docker.internal:8004",
         docker_compose_path="/workspace/GeneradorDeIdeasMuertas",
         docker_project_name="generadordeideasmuertas",

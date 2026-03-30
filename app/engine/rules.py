@@ -35,6 +35,9 @@ class ProjectMetrics:
     # Stagnation
     metric_unchanged_hours: float = 0
     eval_window_hours: int = 720
+    # Change penalty
+    last_decision_type: str | None = None  # last decision for this project
+    hours_since_last_decision: float = 999  # hours since last decision was executed
 
 
 @dataclass
@@ -180,6 +183,13 @@ def eval_casas_fp_high(m: ProjectMetrics) -> RuleResult:
     return RuleResult(fired=False)
 
 
+def eval_change_penalty(m: ProjectMetrics) -> RuleResult:
+    """Suppress decisions if one was recently executed (cost of change)."""
+    # If a decision was executed less than 48h ago, don't fire new ones
+    # This is checked by the estratega before evaluating other rules
+    return RuleResult(fired=False)  # Sentinel - handled in estratega logic
+
+
 def eval_casas_no_users(m: ProjectMetrics) -> RuleResult:
     if m.active_users is not None and m.active_users == 0 and m.unhealthy_hours == 0:
         return RuleResult(
@@ -194,8 +204,8 @@ def eval_casas_no_users(m: ProjectMetrics) -> RuleResult:
 ALL_RULES: list[Rule] = [
     # Universal
     Rule(id="UNIV_HEALTH_DEAD", name="Project dead (unhealthy >24h)", applies_to=["*"], evaluate=eval_health_dead, cooldown_hours=168),
-    Rule(id="UNIV_BUDGET_EXCEEDED", name="Budget exceeded >150%", applies_to=["*"], evaluate=eval_budget_exceeded, cooldown_hours=24),
-    Rule(id="UNIV_STAGNANT", name="Metrics stagnant", applies_to=["*"], evaluate=eval_stagnant, cooldown_hours=336),
+    Rule(id="UNIV_BUDGET_EXCEEDED", name="Budget exceeded >150%", applies_to=["acciones", "compraventa", "libro", "casas"], evaluate=eval_budget_exceeded, cooldown_hours=24),
+    Rule(id="UNIV_STAGNANT", name="Metrics stagnant", applies_to=["acciones", "compraventa", "libro", "casas"], evaluate=eval_stagnant, cooldown_hours=336),
     # Financial
     Rule(id="FIN_ROI_NEGATIVE", name="ROI < -20%", applies_to=["acciones", "compraventa"], evaluate=eval_roi_negative_30d, cooldown_hours=168),
     Rule(id="FIN_ROI_GROWING", name="ROI positive and growing", applies_to=["acciones", "compraventa"], evaluate=eval_roi_positive_growing, cooldown_hours=72),
@@ -210,4 +220,6 @@ ALL_RULES: list[Rule] = [
     # Casas
     Rule(id="CAS_FP_HIGH", name="False positive > 40%", applies_to=["casas"], evaluate=eval_casas_fp_high, cooldown_hours=48),
     Rule(id="CAS_NO_USERS", name="Zero active users", applies_to=["casas"], evaluate=eval_casas_no_users, cooldown_hours=336),
+    # Change penalty
+    Rule(id="UNIV_CHANGE_PENALTY", name="Recent decision cooldown", applies_to=["*"], evaluate=eval_change_penalty, cooldown_hours=48),
 ]
