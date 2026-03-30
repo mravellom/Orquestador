@@ -241,3 +241,239 @@ class TestScale:
         result = await executor._execute_scale(libro_project, log)
         assert result is True
         executor.telegram.send_alert.assert_called_once()
+
+
+class TestRunCycleAutoApprove:
+    """Tests for the auto-approve flow in run_cycle."""
+
+    @pytest.mark.asyncio
+    async def test_auto_approves_non_human_proposed(self, executor):
+        """PROPOSED decisions without requires_human should be auto-approved."""
+        decision = MagicMock()
+        decision.id = 1
+        decision.status = "PROPOSED"
+        decision.requires_human_approval = False
+        decision.decision_type = "PAUSE"
+        decision.proposed_at = datetime.utcnow() - timedelta(minutes=10)
+        decision.project_id = 1
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock()
+
+        # First query: APPROVED decisions - empty
+        approved_result = MagicMock()
+        approved_result.scalars.return_value.all.return_value = []
+        # Second query: PROPOSED non-human decisions
+        proposed_result = MagicMock()
+        proposed_result.scalars.return_value.all.return_value = [decision]
+        # Third query: re-fetch decision for update
+        refetch_result = MagicMock()
+        refetch_result.scalar_one.return_value = decision
+
+        mock_session.execute = AsyncMock(side_effect=[approved_result, proposed_result, refetch_result])
+
+        executor._execute_decision = AsyncMock()
+
+        with patch("app.agents.executor.async_session", return_value=mock_session):
+            await executor.run_cycle()
+
+        # Decision should be auto-approved
+        assert decision.status == "APPROVED"
+        assert decision.approved_by == "auto"
+        executor._execute_decision.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_kill_cooling_period_blocks(self, executor):
+        """KILL decisions within cooling period should NOT be auto-approved."""
+        decision = MagicMock()
+        decision.id = 1
+        decision.status = "PROPOSED"
+        decision.requires_human_approval = False
+        decision.decision_type = "KILL"
+        decision.proposed_at = datetime.utcnow() - timedelta(seconds=60)  # Only 60s ago, cooling=300s
+        decision.project_id = 1
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock()
+
+        approved_result = MagicMock()
+        approved_result.scalars.return_value.all.return_value = []
+        proposed_result = MagicMock()
+        proposed_result.scalars.return_value.all.return_value = [decision]
+
+        mock_session.execute = AsyncMock(side_effect=[approved_result, proposed_result])
+
+        executor._execute_decision = AsyncMock()
+
+        with patch("app.agents.executor.async_session", return_value=mock_session):
+            await executor.run_cycle()
+
+        # Should NOT be executed due to cooling period
+        executor._execute_decision.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_kill_after_cooling_period_proceeds(self, executor):
+        """KILL decisions past cooling period should be auto-approved."""
+        decision = MagicMock()
+        decision.id = 1
+        decision.status = "PROPOSED"
+        decision.requires_human_approval = False
+        decision.decision_type = "KILL"
+        decision.proposed_at = datetime.utcnow() - timedelta(seconds=600)  # 600s ago, cooling=300s
+        decision.project_id = 1
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock()
+
+        approved_result = MagicMock()
+        approved_result.scalars.return_value.all.return_value = []
+        proposed_result = MagicMock()
+        proposed_result.scalars.return_value.all.return_value = [decision]
+        refetch_result = MagicMock()
+        refetch_result.scalar_one.return_value = decision
+
+        mock_session.execute = AsyncMock(side_effect=[approved_result, proposed_result, refetch_result])
+
+        executor._execute_decision = AsyncMock()
+
+        with patch("app.agents.executor.async_session", return_value=mock_session):
+            await executor.run_cycle()
+
+        assert decision.status == "APPROVED"
+        executor._execute_decision.assert_called_once()
+
+
+class TestExecuteDecisionRouting:
+    """Tests for _execute_decision routing and status updates."""
+
+    @pytest.mark.asyncio
+    async def test_pivot_sends_alert_no_docker(self, executor):
+        """PIVOT decisions should send Telegram alert but not touch Docker."""
+        decision = MagicMock()
+        decision.id = 1
+        decision.decision_type = "PIVOT"
+        decision.project_id = 1
+        decision.reasons = ["Stagnant metrics"]
+        decision.status = "APPROVED"
+
+        project = MagicMock()
+        project.id = 1
+        project.slug = "casas"
+        project.name = "Casas"
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock()
+
+        # Query for project
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        # Query for decision update
+        decision_result = MagicMock()
+        decision_result.scalar_one.return_value = decision
+
+        mock_session.execute = AsyncMock(side_effect=[project_result, decision_result])
+
+        with patch("app.agents.executor.async_session", return_value=mock_session):
+            await executor._execute_decision(decision)
+
+        assert decision.status == "EXECUTED"
+        executor.telegram.send_alert.assert_called()
+        executor.docker.compose_down.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_docker_down_failure_marks_failed(self, executor):
+        """When docker compose down fails, decision should be FAILED."""
+        decision = MagicMock()
+        decision.id = 1
+        decision.decision_type = "KILL"
+        decision.project_id = 1
+        decision.status = "APPROVED"
+
+        project = MagicMock()
+        project.id = 1
+        project.slug = "libro"
+        project.name = "Libro"
+        project.requires_graceful_shutdown = False
+        project.docker_compose_path = "/workspace/Libro"
+        project.docker_project_name = "libro"
+
+        executor.docker.compose_down = AsyncMock(return_value=(False, "error: container not found"))
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock()
+
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        decision_result = MagicMock()
+        decision_result.scalar_one.return_value = decision
+
+        mock_session.execute = AsyncMock(side_effect=[project_result, decision_result])
+
+        with patch("app.agents.executor.async_session", return_value=mock_session):
+            await executor._execute_decision(decision)
+
+        assert decision.status == "FAILED"
+
+    @pytest.mark.asyncio
+    async def test_exception_in_action_marks_failed(self, executor):
+        """When an action throws an exception, decision should be FAILED."""
+        decision = MagicMock()
+        decision.id = 1
+        decision.decision_type = "KILL"
+        decision.project_id = 1
+        decision.status = "APPROVED"
+
+        project = MagicMock()
+        project.id = 1
+        project.slug = "libro"
+        project.name = "Libro"
+        project.requires_graceful_shutdown = False
+
+        # Make _execute_kill raise
+        executor._execute_kill = AsyncMock(side_effect=Exception("Docker socket unavailable"))
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock()
+
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        decision_result = MagicMock()
+        decision_result.scalar_one.return_value = decision
+
+        mock_session.execute = AsyncMock(side_effect=[project_result, decision_result])
+
+        with patch("app.agents.executor.async_session", return_value=mock_session):
+            await executor._execute_decision(decision)
+
+        assert decision.status == "FAILED"
+        # execution_log should contain the error
+        assert any("Docker socket" in str(entry) for entry in decision.execution_log)
+
+    @pytest.mark.asyncio
+    async def test_project_not_found_returns_early(self, executor):
+        """When project is not found, should return without executing."""
+        decision = MagicMock()
+        decision.id = 1
+        decision.decision_type = "KILL"
+        decision.project_id = 999
+
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock()
+
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = None
+
+        mock_session.execute = AsyncMock(return_value=project_result)
+
+        with patch("app.agents.executor.async_session", return_value=mock_session):
+            await executor._execute_decision(decision)
+
+        # No publish should happen since we returned early
+        executor.publish.assert_not_called()
