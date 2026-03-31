@@ -1,7 +1,7 @@
 """Tests for BaseConnector: circuit breaker, retry, headers."""
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 
 import httpx
 
@@ -52,12 +52,12 @@ class TestCircuitBreaker:
 
     def test_circuit_open_blocks(self):
         c = ConcreteConnector("http://localhost")
-        c._circuit_open_until = datetime.utcnow() + timedelta(seconds=60)
+        c._circuit_open_until = datetime.now(UTC) + timedelta(seconds=60)
         assert c._is_circuit_open() is True
 
     def test_circuit_closes_after_timeout(self):
         c = ConcreteConnector("http://localhost")
-        c._circuit_open_until = datetime.utcnow() - timedelta(seconds=1)
+        c._circuit_open_until = datetime.now(UTC) - timedelta(seconds=1)
         assert c._is_circuit_open() is False
         assert c._circuit_open_until is None
 

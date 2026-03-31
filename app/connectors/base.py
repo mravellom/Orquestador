@@ -1,6 +1,6 @@
 """Base connector with retry, timeout, and circuit breaker."""
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, UTC
 import time
 
 import httpx
@@ -62,9 +62,9 @@ class BaseConnector:
         return headers
 
     def _is_circuit_open(self) -> bool:
-        if self._circuit_open_until and datetime.utcnow() < self._circuit_open_until:
+        if self._circuit_open_until and datetime.now(UTC) < self._circuit_open_until:
             return True
-        if self._circuit_open_until and datetime.utcnow() >= self._circuit_open_until:
+        if self._circuit_open_until and datetime.now(UTC) >= self._circuit_open_until:
             self._circuit_open_until = None
         return False
 
@@ -75,8 +75,7 @@ class BaseConnector:
     def _record_failure(self):
         self._consecutive_failures += 1
         if self._consecutive_failures >= 5:
-            from datetime import timedelta
-            self._circuit_open_until = datetime.utcnow() + timedelta(seconds=60)
+            self._circuit_open_until = datetime.now(UTC) + timedelta(seconds=60)
             logger.warning("Circuit breaker opened", base_url=self.base_url)
 
     @retry(
