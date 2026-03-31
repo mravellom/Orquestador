@@ -32,14 +32,14 @@ class IdeasConnector(BaseConnector):
         raw = {}
 
         # Ideas count
-        resp, _ = await self._safe_get("/ideas/")
+        resp, _ = await self._safe_get("/api/ideas/")
         if resp and resp.status_code == 200:
             data = resp.json()
             result.items_processed = len(data) if isinstance(data, list) else 0
             raw["ideas_count"] = result.items_processed
 
         # Top ideas
-        resp, _ = await self._safe_get("/ideas/top?limit=10")
+        resp, _ = await self._safe_get("/api/ideas/top?limit=10")
         if resp and resp.status_code == 200:
             raw["top_ideas"] = resp.json()
 
