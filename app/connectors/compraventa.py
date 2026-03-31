@@ -1,7 +1,8 @@
 """Connector for CompraVenta Arbitrage MVP."""
+import httpx
 import structlog
 
-from app.connectors.base import BaseConnector, HealthResult, MetricResult
+from app.connectors.base import BaseConnector, HealthResult, MetricResult, ActionResult
 
 logger = structlog.get_logger()
 
@@ -64,3 +65,31 @@ class CompraVentaConnector(BaseConnector):
 
         result.raw_data = raw
         return result
+
+    async def execute_action(self, action: str, params: dict | None = None) -> ActionResult:
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                if action == "pause_pipeline":
+                    resp = await client.post(
+                        f"{self.base_url}/api/v1/pipeline/pause",
+                        json=params or {"reason": "Orchestrator pause"},
+                        headers=self._headers(),
+                    )
+                    return ActionResult(success=resp.status_code == 200, message=resp.text)
+                elif action == "resume_pipeline":
+                    resp = await client.post(
+                        f"{self.base_url}/api/v1/pipeline/resume",
+                        headers=self._headers(),
+                    )
+                    return ActionResult(success=resp.status_code == 200, message=resp.text)
+                elif action == "check_opportunities":
+                    resp = await client.get(
+                        f"{self.base_url}/api/v1/opportunities/stats",
+                        headers=self._headers(),
+                    )
+                    if resp.status_code == 200:
+                        return ActionResult(success=True, message="OK", details=resp.json())
+                    return ActionResult(success=False, message=resp.text)
+        except Exception as e:
+            return ActionResult(success=False, message=str(e))
+        return ActionResult(success=False, message=f"Unknown action: {action}")

@@ -1,9 +1,11 @@
 import asyncio
 from contextlib import asynccontextmanager
 
+import redis.asyncio as aioredis
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.config import settings
 from app.database import engine, Base
@@ -79,6 +81,37 @@ from app.api.metrics import router as metrics_router
 from app.api.decisions import router as decisions_router
 from app.api.agents import router as agents_router
 from app.api.reports import router as reports_router
+
+@app.get("/health")
+async def health_check():
+    """Liveness/readiness probe for the orchestrator."""
+    checks = {}
+
+    # DB
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        checks["database"] = "ok"
+    except Exception as e:
+        checks["database"] = f"error: {e}"
+
+    # Redis
+    try:
+        r = aioredis.from_url(settings.redis_url, decode_responses=True)
+        await r.ping()
+        await r.close()
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {e}"
+
+    # Agents
+    agents_alive = sum(1 for t in _agent_tasks if not t.done())
+    checks["agents_total"] = len(_agent_tasks)
+    checks["agents_alive"] = agents_alive
+
+    healthy = checks.get("database") == "ok" and agents_alive > 0
+    return {"status": "healthy" if healthy else "degraded", "checks": checks}
+
 
 app.include_router(dashboard_router, prefix="/api/v1", tags=["dashboard"])
 app.include_router(projects_router, prefix="/api/v1", tags=["projects"])

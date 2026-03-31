@@ -1,7 +1,8 @@
 """Connector for Casas InmoAlert Chile MVP."""
+import httpx
 import structlog
 
-from app.connectors.base import BaseConnector, HealthResult, MetricResult
+from app.connectors.base import BaseConnector, HealthResult, MetricResult, ActionResult
 
 logger = structlog.get_logger()
 
@@ -54,3 +55,31 @@ class CasasConnector(BaseConnector):
 
         result.raw_data = raw
         return result
+
+    async def execute_action(self, action: str, params: dict | None = None) -> ActionResult:
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                if action == "pause_scraping":
+                    resp = await client.post(
+                        f"{self.base_url}/api/v1/admin/scraper/pause",
+                        json=params or {"reason": "Orchestrator pause"},
+                        headers=self._headers(),
+                    )
+                    return ActionResult(success=resp.status_code == 200, message=resp.text)
+                elif action == "resume_scraping":
+                    resp = await client.post(
+                        f"{self.base_url}/api/v1/admin/scraper/resume",
+                        headers=self._headers(),
+                    )
+                    return ActionResult(success=resp.status_code == 200, message=resp.text)
+                elif action == "check_feedback":
+                    resp = await client.get(
+                        f"{self.base_url}/api/v1/admin/feedback/stats",
+                        headers=self._headers(),
+                    )
+                    if resp.status_code == 200:
+                        return ActionResult(success=True, message="OK", details=resp.json())
+                    return ActionResult(success=False, message=resp.text)
+        except Exception as e:
+            return ActionResult(success=False, message=str(e))
+        return ActionResult(success=False, message=f"Unknown action: {action}")

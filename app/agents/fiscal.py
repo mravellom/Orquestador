@@ -4,6 +4,7 @@ from sqlalchemy import select
 
 from app.agents.base import BaseAgent
 from app.config import settings, PROJECT_REGISTRY
+from app.notifications.telegram import TelegramNotifier
 from app.connectors.acciones import AccionesConnector
 from app.connectors.compraventa import CompraVentaConnector
 from app.connectors.libro import LibroConnector
@@ -33,6 +34,12 @@ class FiscalAgent(BaseAgent):
         super().__init__()
         self._connectors: dict = {}
         self._last_collection: dict[str, int] = {}  # slug -> cycle_count at last collection
+        self._notifier: TelegramNotifier | None = None
+
+    def _get_notifier(self):
+        if self._notifier is None:
+            self._notifier = TelegramNotifier()
+        return self._notifier
 
     def _get_connector(self, slug: str):
         if slug not in self._connectors:
@@ -107,6 +114,20 @@ class FiscalAgent(BaseAgent):
                 })
 
                 logger.info("Metrics collected", project=project.slug)
+
+                # Alert on critical financial thresholds
+                if metrics.drawdown_pct and metrics.drawdown_pct > 15:
+                    await self._get_notifier().send_alert(
+                        severity="WARNING",
+                        project=project.name,
+                        message=f"Drawdown at {metrics.drawdown_pct:.1f}% (threshold: 15%)",
+                    )
+                if metrics.roi_pct is not None and metrics.roi_pct < -20:
+                    await self._get_notifier().send_alert(
+                        severity="CRITICAL",
+                        project=project.name,
+                        message=f"ROI at {metrics.roi_pct:.1f}% (threshold: -20%)",
+                    )
 
             except Exception as e:
                 logger.error("Failed to collect metrics", project=project.slug, error=str(e))

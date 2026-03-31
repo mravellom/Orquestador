@@ -1,7 +1,8 @@
 """Connector for GeneradorDeIdeasMuertas MVP."""
+import httpx
 import structlog
 
-from app.connectors.base import BaseConnector, HealthResult, MetricResult
+from app.connectors.base import BaseConnector, HealthResult, MetricResult, ActionResult
 
 logger = structlog.get_logger()
 
@@ -45,3 +46,26 @@ class IdeasConnector(BaseConnector):
 
         result.raw_data = raw
         return result
+
+    async def execute_action(self, action: str, params: dict | None = None) -> ActionResult:
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                if action == "run_scraper":
+                    resp = await client.post(
+                        f"{self.base_url}/api/scraper/run",
+                        headers=self._headers(),
+                    )
+                    if resp.status_code == 200:
+                        return ActionResult(success=True, message="OK", details=resp.json())
+                    return ActionResult(success=False, message=resp.text)
+                elif action == "analyze_all":
+                    resp = await client.post(
+                        f"{self.base_url}/api/ideas/analyze-all",
+                        headers=self._headers(),
+                    )
+                    if resp.status_code == 200:
+                        return ActionResult(success=True, message="OK", details=resp.json())
+                    return ActionResult(success=False, message=resp.text)
+        except Exception as e:
+            return ActionResult(success=False, message=str(e))
+        return ActionResult(success=False, message=f"Unknown action: {action}")

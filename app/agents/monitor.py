@@ -4,6 +4,7 @@ from sqlalchemy import select
 
 from app.agents.base import BaseAgent
 from app.config import settings, PROJECT_REGISTRY
+from app.notifications.telegram import TelegramNotifier
 from app.connectors.acciones import AccionesConnector
 from app.connectors.compraventa import CompraVentaConnector
 from app.connectors.libro import LibroConnector
@@ -33,6 +34,12 @@ class MonitorAgent(BaseAgent):
         super().__init__()
         self._connectors: dict = {}
         self._failure_counts: dict[str, int] = {}
+        self._notifier: TelegramNotifier | None = None
+
+    def _get_notifier(self):
+        if self._notifier is None:
+            self._notifier = TelegramNotifier()
+        return self._notifier
 
     def _get_connector(self, slug: str):
         if slug not in self._connectors:
@@ -105,3 +112,8 @@ class MonitorAgent(BaseAgent):
                     "message": f"{project.name} has been unhealthy for 3 consecutive checks",
                 })
                 logger.warning("Project unhealthy", project=project.slug, failures=3)
+                await self._get_notifier().send_alert(
+                    severity="CRITICAL",
+                    project=project.name,
+                    message=f"Unhealthy for 3 consecutive checks ({3 * self.cadence_seconds}s)",
+                )
