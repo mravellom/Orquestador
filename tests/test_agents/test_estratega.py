@@ -122,11 +122,14 @@ class TestBuildMetrics:
         # Second query: latest metric snapshot - None
         snap_result = MagicMock()
         snap_result.scalar_one_or_none.return_value = None
-        # Third query: ROI trend snapshots - empty
+        # Third query: previous metric snapshot - None
+        prev_snap_result = MagicMock()
+        prev_snap_result.scalar_one_or_none.return_value = None
+        # Fourth query: ROI trend snapshots - empty
         trend_result = MagicMock()
         trend_result.scalars.return_value.all.return_value = []
 
-        mock_session.execute = AsyncMock(side_effect=[health_result, snap_result, trend_result])
+        mock_session.execute = AsyncMock(side_effect=[health_result, snap_result, prev_snap_result, trend_result])
 
         with patch("app.agents.estratega.async_session", return_value=mock_session):
             metrics = await estratega._build_metrics(mock_project)
@@ -163,10 +166,12 @@ class TestBuildMetrics:
         health_result.scalars.return_value.all.return_value = checks
         snap_result = MagicMock()
         snap_result.scalar_one_or_none.return_value = None
+        prev_snap_result = MagicMock()
+        prev_snap_result.scalar_one_or_none.return_value = None
         trend_result = MagicMock()
         trend_result.scalars.return_value.all.return_value = []
 
-        mock_session.execute = AsyncMock(side_effect=[health_result, snap_result, trend_result])
+        mock_session.execute = AsyncMock(side_effect=[health_result, snap_result, prev_snap_result, trend_result])
 
         with patch("app.agents.estratega.async_session", return_value=mock_session):
             metrics = await estratega._build_metrics(mock_project)
@@ -200,15 +205,19 @@ class TestBuildMetrics:
         snapshot.active_users = None
         snapshot.items_processed = 42
         snapshot.false_positive_rate = None
+        snapshot.total_capital = 5000
         snapshot.raw_data = {"risk": {"circuit_breaker_active": True, "risk_level": "HIGH"}}
 
         snap_result = MagicMock()
         snap_result.scalar_one_or_none.return_value = snapshot
 
+        prev_snap_result = MagicMock()
+        prev_snap_result.scalar_one_or_none.return_value = None
+
         trend_result = MagicMock()
         trend_result.scalars.return_value.all.return_value = []
 
-        mock_session.execute = AsyncMock(side_effect=[health_result, snap_result, trend_result])
+        mock_session.execute = AsyncMock(side_effect=[health_result, snap_result, prev_snap_result, trend_result])
 
         with patch("app.agents.estratega.async_session", return_value=mock_session):
             metrics = await estratega._build_metrics(mock_project)
@@ -240,6 +249,8 @@ class TestBuildMetrics:
         health_result.scalars.return_value.all.return_value = []
         snap_result = MagicMock()
         snap_result.scalar_one_or_none.return_value = None
+        prev_snap_result = MagicMock()
+        prev_snap_result.scalar_one_or_none.return_value = None
 
         # 2 snapshots for trend: ROI went from 5% to 15% over 10 days
         snap1 = MagicMock()
@@ -252,7 +263,7 @@ class TestBuildMetrics:
         trend_result = MagicMock()
         trend_result.scalars.return_value.all.return_value = [snap1, snap2]
 
-        mock_session.execute = AsyncMock(side_effect=[health_result, snap_result, trend_result])
+        mock_session.execute = AsyncMock(side_effect=[health_result, snap_result, prev_snap_result, trend_result])
 
         with patch("app.agents.estratega.async_session", return_value=mock_session):
             metrics = await estratega._build_metrics(mock_project)
@@ -278,6 +289,8 @@ class TestBuildMetrics:
         health_result.scalars.return_value.all.return_value = []
         snap_result = MagicMock()
         snap_result.scalar_one_or_none.return_value = None
+        prev_snap_result = MagicMock()
+        prev_snap_result.scalar_one_or_none.return_value = None
 
         snap1 = MagicMock()
         snap1.roi_pct = 5.0
@@ -285,7 +298,7 @@ class TestBuildMetrics:
         trend_result = MagicMock()
         trend_result.scalars.return_value.all.return_value = [snap1]
 
-        mock_session.execute = AsyncMock(side_effect=[health_result, snap_result, trend_result])
+        mock_session.execute = AsyncMock(side_effect=[health_result, snap_result, prev_snap_result, trend_result])
 
         with patch("app.agents.estratega.async_session", return_value=mock_session):
             metrics = await estratega._build_metrics(mock_project)

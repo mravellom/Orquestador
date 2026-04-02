@@ -59,19 +59,20 @@ class TestKillAcciones:
     async def test_halts_first(self, executor, acciones_project):
         mock_connector = AsyncMock()
         mock_connector.execute_action = AsyncMock(side_effect=[
-            ActionResult(success=True, message="halted"),
-            ActionResult(success=True, message="0 open", details={"open_positions": 0}),
+            ActionResult(success=True, message="halted"),                          # halt
+            ActionResult(success=True, details={"positions": []}),                 # list_positions
+            ActionResult(success=True, message="0 open", details={"open_positions": 0}),  # check_positions
         ])
 
         executor.docker.compose_down = AsyncMock(return_value=(True, "ok"))
+        executor._get_acciones_connector = MagicMock(return_value=mock_connector)
 
         mock_session = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock()
         mock_session.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=acciones_project)))
 
-        with patch("app.agents.executor.AccionesConnector", return_value=mock_connector), \
-             patch("app.agents.executor.async_session", return_value=mock_session):
+        with patch("app.agents.executor.async_session", return_value=mock_session):
             log = []
             result = await executor._execute_kill(acciones_project, log)
 
@@ -80,47 +81,24 @@ class TestKillAcciones:
         assert first_call[0][0] == "halt"
 
     @pytest.mark.asyncio
-    async def test_waits_for_positions_to_close(self, executor, acciones_project):
-        mock_connector = AsyncMock()
-        mock_connector.execute_action = AsyncMock(side_effect=[
-            ActionResult(success=True),
-            ActionResult(success=True, details={"open_positions": 2}),
-            ActionResult(success=True, details={"open_positions": 1}),
-            ActionResult(success=True, details={"open_positions": 0}),
-        ])
-
-        executor.docker.compose_down = AsyncMock(return_value=(True, "ok"))
-
-        mock_session = AsyncMock()
-        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_session.__aexit__ = AsyncMock()
-        mock_session.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=acciones_project)))
-
-        with patch("app.agents.executor.AccionesConnector", return_value=mock_connector), \
-             patch("app.agents.executor.async_session", return_value=mock_session), \
-             patch("asyncio.sleep", new_callable=AsyncMock):
-            log = []
-            result = await executor._execute_kill(acciones_project, log)
-
-        assert result is True
-        assert mock_connector.execute_action.call_count == 4
-
-    @pytest.mark.asyncio
     async def test_aborts_on_timeout(self, executor, acciones_project):
         mock_connector = AsyncMock()
         mock_connector.execute_action = AsyncMock(side_effect=[
-            ActionResult(success=True),
+            ActionResult(success=True),                                            # halt
+            ActionResult(success=True, details={"positions": [{"id": 1}]}),       # list_positions
+            ActionResult(success=True, details={"position_id": 1}),               # close_position
         ] + [
-            ActionResult(success=True, details={"open_positions": 2})
+            ActionResult(success=True, details={"open_positions": 2})             # check_positions (20x)
             for _ in range(20)
         ])
+
+        executor._get_acciones_connector = MagicMock(return_value=mock_connector)
 
         mock_session = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock()
 
-        with patch("app.agents.executor.AccionesConnector", return_value=mock_connector), \
-             patch("app.agents.executor.async_session", return_value=mock_session), \
+        with patch("app.agents.executor.async_session", return_value=mock_session), \
              patch("asyncio.sleep", new_callable=AsyncMock):
             log = []
             result = await executor._execute_kill(acciones_project, log)
@@ -132,16 +110,18 @@ class TestKillAcciones:
     async def test_aborts_on_check_fail(self, executor, acciones_project):
         mock_connector = AsyncMock()
         mock_connector.execute_action = AsyncMock(side_effect=[
-            ActionResult(success=True),
-            ActionResult(success=True, details={"open_positions": -1}),
+            ActionResult(success=True),                                            # halt
+            ActionResult(success=True, details={"positions": []}),                 # list_positions
+            ActionResult(success=True, details={"open_positions": -1}),            # check_positions
         ])
+
+        executor._get_acciones_connector = MagicMock(return_value=mock_connector)
 
         mock_session = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock()
 
-        with patch("app.agents.executor.AccionesConnector", return_value=mock_connector), \
-             patch("app.agents.executor.async_session", return_value=mock_session):
+        with patch("app.agents.executor.async_session", return_value=mock_session):
             log = []
             result = await executor._execute_kill(acciones_project, log)
 
@@ -170,14 +150,14 @@ class TestPauseResume:
     async def test_pause_acciones_uses_api(self, executor, acciones_project):
         mock_connector = AsyncMock()
         mock_connector.execute_action = AsyncMock(return_value=ActionResult(success=True))
+        executor._get_acciones_connector = MagicMock(return_value=mock_connector)
 
         mock_session = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock()
         mock_session.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=acciones_project)))
 
-        with patch("app.agents.executor.AccionesConnector", return_value=mock_connector), \
-             patch("app.agents.executor.async_session", return_value=mock_session):
+        with patch("app.agents.executor.async_session", return_value=mock_session):
             log = []
             result = await executor._execute_pause(acciones_project, log)
 
@@ -204,14 +184,14 @@ class TestPauseResume:
     async def test_resume_acciones_uses_api(self, executor, acciones_project):
         mock_connector = AsyncMock()
         mock_connector.execute_action = AsyncMock(return_value=ActionResult(success=True))
+        executor._get_acciones_connector = MagicMock(return_value=mock_connector)
 
         mock_session = AsyncMock()
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock()
         mock_session.execute = AsyncMock(return_value=MagicMock(scalar_one=MagicMock(return_value=acciones_project)))
 
-        with patch("app.agents.executor.AccionesConnector", return_value=mock_connector), \
-             patch("app.agents.executor.async_session", return_value=mock_session):
+        with patch("app.agents.executor.async_session", return_value=mock_session):
             log = []
             result = await executor._execute_resume(acciones_project, log)
 

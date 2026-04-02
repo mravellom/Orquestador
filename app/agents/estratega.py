@@ -1,5 +1,6 @@
 """Estratega Agent: central brain that evaluates rules and proposes decisions."""
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import select, func
@@ -29,6 +30,8 @@ class EstrategaAgent(BaseAgent):
         "ACC_DAILY_LOSS",
         "FIN_DRAWDOWN",
         "UNIV_BUDGET_EXCEEDED",
+        "ACC_RECONCILIATION",
+        "ACC_STOCKS_MARKET_HOURS",
     })
 
     # Strategic rules: need time to be meaningful, evaluated every 6 hours
@@ -92,6 +95,7 @@ class EstrategaAgent(BaseAgent):
             latest = (await session.execute(snap_q)).scalar_one_or_none()
 
             if latest:
+                metrics.total_capital = float(latest.total_capital) if latest.total_capital is not None else None
                 metrics.roi_pct = float(latest.roi_pct) if latest.roi_pct is not None else None
                 metrics.pnl_usd = float(latest.pnl_usd) if latest.pnl_usd is not None else None
                 metrics.drawdown_pct = float(latest.drawdown_pct) if latest.drawdown_pct is not None else None
@@ -110,6 +114,105 @@ class EstrategaAgent(BaseAgent):
                     compliance = raw.get("risk", {})
                     if isinstance(compliance, dict) and "risk_level" in compliance:
                         metrics.compliance_risk = compliance["risk_level"]
+
+                # Reconciliation issues from health details stored in raw_data
+                recon_data = raw.get("reconciliation", {})
+                if isinstance(recon_data, dict):
+                    issues = recon_data.get("issues", [])
+                    metrics.reconciliation_issues = len(issues) if isinstance(issues, list) else 0
+
+            # Previous snapshot: extract circuit_breaker_active for CB reset rule
+            prev_snap_q = (
+                select(MetricSnapshot)
+                .where(MetricSnapshot.project_id == project.id)
+                .order_by(MetricSnapshot.captured_at.desc())
+                .offset(1)
+                .limit(1)
+            )
+            previous = (await session.execute(prev_snap_q)).scalar_one_or_none()
+            if previous:
+                prev_raw = previous.raw_data or {}
+                prev_risk = prev_raw.get("risk", {})
+                if isinstance(prev_risk, dict):
+                    metrics.circuit_breaker_active_previous = prev_risk.get("circuit_breaker_active", False)
+
+            # --- Phase 2: enrich metrics from raw_data ---
+            if latest:
+                raw = latest.raw_data or {}
+
+                # Asset class breakdown
+                breakdown = raw.get("portfolio_breakdown", [])
+                if isinstance(breakdown, list):
+                    for entry in breakdown:
+                        ac = entry.get("asset_class", "").upper()
+                        if ac == "CRYPTO":
+                            metrics.crypto_pnl_usd = entry.get("pnl") or entry.get("daily_pnl")
+                            metrics.crypto_capital = entry.get("total_capital")
+                        elif ac in ("STOCKS", "STOCK"):
+                            metrics.stocks_pnl_usd = entry.get("pnl") or entry.get("daily_pnl")
+                            metrics.stocks_capital = entry.get("total_capital")
+
+                # Count stock positions open
+                open_positions = raw.get("open_positions", [])
+                if isinstance(open_positions, list):
+                    metrics.stocks_positions_open = sum(
+                        1 for p in open_positions
+                        if isinstance(p, dict) and p.get("asset_class", "").upper() in ("STOCKS", "STOCK")
+                    )
+
+                # Stock market hours check (ET timezone)
+                now_et = datetime.now(ZoneInfo("America/New_York"))
+                weekday = now_et.weekday()  # 0=Monday, 6=Sunday
+                hour_min = now_et.hour * 100 + now_et.minute
+                metrics.is_stock_market_open = (
+                    weekday < 5  # Mon-Fri
+                    and 930 <= hour_min <= 1600
+                )
+
+                # Total capital for asset class checks
+                if metrics.total_capital is None and (metrics.crypto_capital or metrics.stocks_capital):
+                    metrics.total_capital = (metrics.crypto_capital or 0) + (metrics.stocks_capital or 0)
+
+                # Strategy performance
+                strategies = raw.get("strategies", [])
+                per_strat = raw.get("per_strategy_analytics", [])
+                if isinstance(strategies, list) and isinstance(per_strat, list):
+                    # Merge strategy info with analytics
+                    analytics_by_id = {}
+                    for a in per_strat:
+                        sid = a.get("strategy_id") or a.get("id")
+                        if sid:
+                            analytics_by_id[sid] = a
+
+                    for s in strategies:
+                        sid = s.get("id")
+                        a = analytics_by_id.get(sid, {})
+                        metrics.strategy_performance.append({
+                            "id": sid,
+                            "name": s.get("name", ""),
+                            "is_active": s.get("is_active", True),
+                            "asset_class": s.get("asset_class", ""),
+                            "win_rate_pct": a.get("win_rate") or a.get("win_rate_pct", 50),
+                            "trades_count": a.get("total_trades") or a.get("trades_count", 0),
+                            "pnl_usd": a.get("total_pnl") or a.get("pnl_usd", 0),
+                            "sharpe_ratio": a.get("sharpe_ratio"),
+                        })
+
+                    metrics.active_strategy_count = sum(1 for s in strategies if s.get("is_active", True))
+
+                # ML shadow performance
+                ml_shadow = raw.get("ml_shadow", {})
+                if isinstance(ml_shadow, dict):
+                    metrics.ml_shadow_win_rate = ml_shadow.get("win_rate") or ml_shadow.get("ml_win_rate")
+                    metrics.live_win_rate = ml_shadow.get("live_win_rate") or (
+                        float(metrics.win_rate_pct) if metrics.win_rate_pct is not None else None
+                    )
+
+                # Paper vs live
+                pvl = raw.get("paper_vs_live", {})
+                if isinstance(pvl, dict):
+                    metrics.paper_pnl = pvl.get("paper_pnl") or pvl.get("paper", {}).get("pnl")
+                    metrics.live_pnl = pvl.get("live_pnl") or pvl.get("live", {}).get("pnl")
 
             # ROI trend: simple slope from last N snapshots
             window_start = datetime.utcnow() - timedelta(hours=metrics.eval_window_hours)
@@ -151,6 +254,26 @@ class EstrategaAgent(BaseAgent):
         for project in projects:
             metrics = await self._build_metrics(project)
 
+            # Determine enrichment params for scoring
+            asset_class_count = 1
+            if metrics.crypto_capital and metrics.stocks_capital:
+                asset_class_count = 2
+
+            pending_count = 0
+            async with async_session() as session:
+                snap_q = (
+                    select(MetricSnapshot)
+                    .where(MetricSnapshot.project_id == project.id)
+                    .order_by(MetricSnapshot.captured_at.desc())
+                    .limit(1)
+                )
+                latest_snap = (await session.execute(snap_q)).scalar_one_or_none()
+                if latest_snap and latest_snap.raw_data:
+                    pending = latest_snap.raw_data.get("pending_approvals", [])
+                    pending_count = len(pending) if isinstance(pending, list) else 0
+
+            reconciliation_ok = metrics.reconciliation_issues == 0
+
             # Calculate portfolio score
             score = calculate_portfolio_score(
                 is_healthy=metrics.is_healthy,
@@ -161,6 +284,10 @@ class EstrategaAgent(BaseAgent):
                 revenue_usd=metrics.revenue_usd,
                 items_processed=metrics.items_processed,
                 false_positive_rate=metrics.false_positive_rate,
+                reconciliation_ok=reconciliation_ok,
+                asset_class_count=asset_class_count,
+                strategy_diversity=metrics.active_strategy_count or None,
+                pending_approvals_count=pending_count,
             )
 
             # Track score history and apply hysteresis
@@ -175,6 +302,9 @@ class EstrategaAgent(BaseAgent):
                 score, self._score_history[project.slug], current_signal,
             )
             self._current_signals[project.slug] = signal
+
+            # Inject portfolio score into metrics for score-based rules
+            metrics.portfolio_score = score
 
             logger.info("Portfolio score", project=project.slug, score=score, signal=signal)
 
@@ -196,6 +326,7 @@ class EstrategaAgent(BaseAgent):
                     continue
 
                 # Hysteresis guard: suppress SCALE if signal is not SCALE, suppress KILL if signal is not KILL
+                # ADJUST_RISK and RESUME bypass hysteresis — they are reactive corrections
                 if result.decision_type == "SCALE" and signal != "SCALE":
                     continue
                 if result.decision_type == "KILL" and signal != "KILL" and rule.id != "UNIV_HEALTH_DEAD":
@@ -208,6 +339,17 @@ class EstrategaAgent(BaseAgent):
                 if settings.kill_requires_human_approval and result.decision_type == "KILL":
                     needs_human = True
 
+                # Build action_params for strategy-level decisions
+                action_params = {}
+                if result.decision_type in ("DEACTIVATE_STRATEGY", "ACTIVATE_STRATEGY"):
+                    # Extract strategy info from the reason (the rule includes it)
+                    for strat in metrics.strategy_performance:
+                        name = strat.get("name", "")
+                        if name and name in result.reason:
+                            action_params["strategy_id"] = strat.get("id")
+                            action_params["strategy_name"] = name
+                            break
+
                 # Create decision
                 async with async_session() as session:
                     decision = Decision(
@@ -218,6 +360,7 @@ class EstrategaAgent(BaseAgent):
                         reasons=[result.reason],
                         rule_triggers=[rule.id],
                         requires_human_approval=needs_human,
+                        action_params=action_params,
                     )
                     session.add(decision)
                     await session.commit()

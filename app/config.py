@@ -64,6 +64,24 @@ class Settings(BaseSettings):
     kill_cooling_period_seconds: int = 300
     max_concurrent_executions: int = 1
 
+    # Acciones risk adjustment
+    acciones_risk_tighten_score: int = 40
+    acciones_risk_restore_score: int = 60
+
+    # Acciones strategy management
+    acciones_strategy_min_trades: int = 50
+    acciones_strategy_min_winrate: float = 30.0
+    acciones_ml_divergence_threshold: float = 15.0
+
+    # Acciones order approval (Phase 3)
+    acciones_auto_approve_enabled: bool = False
+    acciones_max_order_size_pct: float = 10.0
+    acciones_auto_approve_max_usd: float = 100.0
+
+    # Acciones WebSocket (Phase 4)
+    acciones_ws_url: str = "ws://host.docker.internal:8001/ws"
+    acciones_ws_enabled: bool = False
+
     # Docker
     docker_socket: str = "unix:///var/run/docker.sock"
 
@@ -89,10 +107,18 @@ PROJECT_REGISTRY: list[ProjectConfig] = [
         metrics_endpoints={
             "portfolio_paper": "/api/v1/portfolio/?mode=PAPER",
             "portfolio_live": "/api/v1/portfolio/?mode=LIVE",
+            "portfolio_breakdown": "/api/v1/portfolio/breakdown",
             "analytics": "/api/v1/analytics/summary",
+            "analytics_per_strategy": "/api/v1/analytics/per-strategy",
+            "analytics_paper_vs_live": "/api/v1/analytics/paper-vs-live",
+            "analytics_ml_shadow": "/api/v1/analytics/ml-shadow",
             "risk": "/api/v1/risk/status",
             "pnl": "/api/v1/analytics/pnl?days=30",
             "drawdown": "/api/v1/analytics/drawdown?days=30",
+            "strategies": "/api/v1/strategies/",
+            "win_rate": "/api/v1/trades/win-rate",
+            "positions_open": "/api/v1/positions/open",
+            "pending_approvals": "/api/v1/orders/pending-approval",
         },
         api_key_env="acciones_api_key",
     ),

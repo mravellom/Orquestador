@@ -24,6 +24,7 @@ def acciones_metrics():
         business_model="trading",
         handles_real_money=True,
         eval_window_hours=168,
+        total_capital=10000,
     )
 
 

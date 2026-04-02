@@ -17,6 +17,7 @@ class HealthResult:
     response_ms: int | None = None
     database_ok: bool | None = None
     redis_ok: bool | None = None
+    reconciliation_ok: bool | None = None
     details: dict = field(default_factory=dict)
     error_message: str | None = None
 
@@ -35,6 +36,11 @@ class MetricResult:
     active_users: int | None = None
     items_processed: int | None = None
     false_positive_rate: float | None = None
+    # Asset class breakdown (Acciones)
+    crypto_pnl_usd: float | None = None
+    stocks_pnl_usd: float | None = None
+    crypto_capital: float | None = None
+    stocks_capital: float | None = None
     raw_data: dict = field(default_factory=dict)
 
 
@@ -104,6 +110,69 @@ class BaseConnector:
             elapsed = int((time.monotonic() - start) * 1000)
             self._record_failure()
             logger.error("Connector request failed", url=f"{self.base_url}{path}", error=str(e))
+            return None, elapsed
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((httpx.ConnectError, httpx.TimeoutException)),
+    )
+    async def _post(self, path: str, json: dict | None = None) -> httpx.Response:
+        if self._is_circuit_open():
+            raise httpx.ConnectError(f"Circuit breaker open for {self.base_url}")
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            url = f"{self.base_url}{path}"
+            response = await client.post(url, json=json, headers=self._headers())
+            # Don't retry on 4xx — only connection errors and 5xx are retried
+            if 400 <= response.status_code < 500:
+                return response
+            response.raise_for_status()
+            return response
+
+    async def _safe_post(self, path: str, json: dict | None = None) -> tuple[httpx.Response | None, int]:
+        """POST with timing and circuit breaker. Returns (response, elapsed_ms)."""
+        start = time.monotonic()
+        try:
+            resp = await self._post(path, json)
+            elapsed = int((time.monotonic() - start) * 1000)
+            self._record_success()
+            return resp, elapsed
+        except Exception as e:
+            elapsed = int((time.monotonic() - start) * 1000)
+            self._record_failure()
+            logger.error("Connector POST failed", url=f"{self.base_url}{path}", error=str(e))
+            return None, elapsed
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((httpx.ConnectError, httpx.TimeoutException)),
+    )
+    async def _put(self, path: str, json: dict | None = None) -> httpx.Response:
+        if self._is_circuit_open():
+            raise httpx.ConnectError(f"Circuit breaker open for {self.base_url}")
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            url = f"{self.base_url}{path}"
+            response = await client.put(url, json=json, headers=self._headers())
+            if 400 <= response.status_code < 500:
+                return response
+            response.raise_for_status()
+            return response
+
+    async def _safe_put(self, path: str, json: dict | None = None) -> tuple[httpx.Response | None, int]:
+        """PUT with timing and circuit breaker. Returns (response, elapsed_ms)."""
+        start = time.monotonic()
+        try:
+            resp = await self._put(path, json)
+            elapsed = int((time.monotonic() - start) * 1000)
+            self._record_success()
+            return resp, elapsed
+        except Exception as e:
+            elapsed = int((time.monotonic() - start) * 1000)
+            self._record_failure()
+            logger.error("Connector PUT failed", url=f"{self.base_url}{path}", error=str(e))
             return None, elapsed
 
     async def check_health(self) -> HealthResult:

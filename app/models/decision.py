@@ -12,7 +12,7 @@ class Decision(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
-    decision_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    decision_type: Mapped[str] = mapped_column(String(30), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="PROPOSED")
     confidence: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True)
     reasons: Mapped[dict] = mapped_column(JSONB, default=list)
@@ -23,3 +23,4 @@ class Decision(Base):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     execution_log: Mapped[dict] = mapped_column(JSONB, default=list)
+    action_params: Mapped[dict] = mapped_column(JSONB, default=dict)

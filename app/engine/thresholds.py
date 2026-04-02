@@ -7,6 +7,16 @@ PROJECT_THRESHOLDS = {
         "max_drawdown": 15,
         "max_daily_loss_pct": 5,
         "eval_window_hours": 168,
+        "max_reconciliation_issues": 0,
+        "cb_reset_drawdown_threshold": 10,
+        "risk_tighten_score": 40,
+        "risk_restore_score": 60,
+        # Phase 2: stocks + strategies
+        "stocks_max_concentration_pct": 70,
+        "strategy_underperform_winrate": 30,
+        "strategy_underperform_min_trades": 50,
+        "ml_shadow_divergence_pp": 15,
+        "paper_live_divergence_pct": 5,
     },
     "compraventa": {
         "kill_roi_threshold": -20,

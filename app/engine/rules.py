@@ -13,6 +13,7 @@ class ProjectMetrics:
     is_healthy: bool = True
     unhealthy_hours: float = 0
     # Financial
+    total_capital: float | None = None
     roi_pct: float | None = None
     roi_trend: float | None = None  # slope of ROI over eval window
     pnl_usd: float | None = None
@@ -32,6 +33,27 @@ class ProjectMetrics:
     compliance_risk: str | None = None  # "LOW", "MEDIUM", "HIGH"
     # Circuit breaker (Acciones)
     circuit_breaker_active: bool = False
+    circuit_breaker_active_previous: bool = False
+    # Reconciliation
+    reconciliation_issues: int = 0
+    # Portfolio score (set by estratega before rule evaluation)
+    portfolio_score: float | None = None
+    # Asset class breakdown (Acciones)
+    crypto_pnl_usd: float | None = None
+    stocks_pnl_usd: float | None = None
+    crypto_capital: float | None = None
+    stocks_capital: float | None = None
+    stocks_positions_open: int = 0
+    is_stock_market_open: bool = True
+    # Strategy performance
+    strategy_performance: list = field(default_factory=list)  # list of dicts with strategy-level metrics
+    active_strategy_count: int = 0
+    # ML shadow
+    ml_shadow_win_rate: float | None = None
+    live_win_rate: float | None = None
+    # Paper vs live
+    paper_pnl: float | None = None
+    live_pnl: float | None = None
     # Stagnation
     metric_unchanged_hours: float = 0
     eval_window_hours: int = 720
@@ -183,6 +205,148 @@ def eval_casas_fp_high(m: ProjectMetrics) -> RuleResult:
     return RuleResult(fired=False)
 
 
+def eval_reconciliation(m: ProjectMetrics) -> RuleResult:
+    """Pause if Acciones has state inconsistencies between DB and exchange."""
+    if m.reconciliation_issues > 0:
+        return RuleResult(
+            fired=True, decision_type="PAUSE", confidence=90,
+            reason=f"Reconciliation found {m.reconciliation_issues} inconsistencies — data integrity risk",
+        )
+    return RuleResult(fired=False)
+
+
+def eval_risk_tighten(m: ProjectMetrics) -> RuleResult:
+    """Tighten risk parameters when portfolio score drops below 40."""
+    if m.portfolio_score is not None and m.portfolio_score < 40:
+        confidence = min(90, 60 + (40 - m.portfolio_score))
+        return RuleResult(
+            fired=True, decision_type="ADJUST_RISK", confidence=confidence,
+            reason=f"Portfolio score {m.portfolio_score:.1f} < 40 — tightening risk parameters",
+            requires_human=False,
+        )
+    return RuleResult(fired=False)
+
+
+def eval_cb_reset(m: ProjectMetrics) -> RuleResult:
+    """Propose RESUME when circuit breaker was active but conditions recovered."""
+    if (
+        m.circuit_breaker_active_previous
+        and not m.circuit_breaker_active
+        and m.drawdown_pct is not None
+        and m.drawdown_pct < 10
+        and m.win_rate_pct is not None
+        and m.win_rate_pct >= 40
+    ):
+        return RuleResult(
+            fired=True, decision_type="RESUME", confidence=70,
+            reason=f"Circuit breaker recovered: drawdown {m.drawdown_pct:.1f}% < 10%, win rate {m.win_rate_pct:.1f}% stable",
+            requires_human=True,
+        )
+    return RuleResult(fired=False)
+
+
+# --- Acciones Stocks Rules ---
+
+def eval_stocks_market_hours(m: ProjectMetrics) -> RuleResult:
+    """Alert when stock positions are open outside market hours."""
+    if not m.is_stock_market_open and m.stocks_positions_open > 0:
+        return RuleResult(
+            fired=True, decision_type="PAUSE", confidence=85,
+            reason=f"{m.stocks_positions_open} stock positions open outside market hours (9:30-16:00 ET)",
+        )
+    return RuleResult(fired=False)
+
+
+def eval_stocks_concentration(m: ProjectMetrics) -> RuleResult:
+    """Tighten risk if stocks exceed 70% of total capital."""
+    if m.stocks_capital and m.total_capital and m.total_capital > 0:
+        stocks_pct = (m.stocks_capital / m.total_capital) * 100
+        if stocks_pct > 70:
+            return RuleResult(
+                fired=True, decision_type="ADJUST_RISK", confidence=75,
+                reason=f"Stocks concentration {stocks_pct:.0f}% exceeds 70% of total capital",
+                requires_human=False,
+            )
+    return RuleResult(fired=False)
+
+
+def eval_crypto_stocks_divergence(m: ProjectMetrics) -> RuleResult:
+    """Alert when crypto and stocks PnL diverge significantly."""
+    if m.crypto_pnl_usd is not None and m.stocks_pnl_usd is not None:
+        if m.total_capital and m.total_capital > 0:
+            divergence = abs(m.crypto_pnl_usd - m.stocks_pnl_usd) / m.total_capital * 100
+            # One deeply negative while other positive
+            if divergence > 5 and (
+                (m.crypto_pnl_usd < 0 and m.stocks_pnl_usd > 0)
+                or (m.crypto_pnl_usd > 0 and m.stocks_pnl_usd < 0)
+            ):
+                return RuleResult(
+                    fired=True, decision_type="PIVOT", confidence=65,
+                    reason=f"Crypto/stocks PnL divergence: crypto ${m.crypto_pnl_usd:.2f}, stocks ${m.stocks_pnl_usd:.2f} ({divergence:.1f}% of capital)",
+                )
+    return RuleResult(fired=False)
+
+
+# --- Acciones Strategy Rules ---
+
+def eval_strategy_underperform(m: ProjectMetrics) -> RuleResult:
+    """Deactivate strategies with win rate < 30% over 50+ trades."""
+    for strat in m.strategy_performance:
+        trades = strat.get("trades_count", 0)
+        win_rate = strat.get("win_rate_pct", 50)
+        is_active = strat.get("is_active", True)
+        if is_active and trades >= 50 and win_rate < 30:
+            return RuleResult(
+                fired=True, decision_type="DEACTIVATE_STRATEGY", confidence=80,
+                reason=f"Strategy '{strat.get('name', '?')}' win rate {win_rate:.1f}% < 30% over {trades} trades",
+                requires_human=False,
+            )
+    return RuleResult(fired=False)
+
+
+def eval_strategy_overperform(m: ProjectMetrics) -> RuleResult:
+    """Suggest reactivating a deactivated strategy with good shadow performance."""
+    for strat in m.strategy_performance:
+        is_active = strat.get("is_active", True)
+        win_rate = strat.get("win_rate_pct", 0)
+        trades = strat.get("trades_count", 0)
+        if not is_active and trades >= 30 and win_rate > 60:
+            return RuleResult(
+                fired=True, decision_type="ACTIVATE_STRATEGY", confidence=65,
+                reason=f"Deactivated strategy '{strat.get('name', '?')}' showing {win_rate:.1f}% win rate over {trades} shadow trades",
+                requires_human=True,
+            )
+    return RuleResult(fired=False)
+
+
+# --- Acciones ML & Paper Rules ---
+
+def eval_ml_shadow_divergence(m: ProjectMetrics) -> RuleResult:
+    """Alert when ML shadow signals significantly outperform live trading."""
+    if m.ml_shadow_win_rate is not None and m.live_win_rate is not None:
+        divergence_pp = m.ml_shadow_win_rate - m.live_win_rate
+        if divergence_pp > 15:
+            return RuleResult(
+                fired=True, decision_type="PIVOT", confidence=70,
+                reason=f"ML shadow win rate {m.ml_shadow_win_rate:.1f}% vs live {m.live_win_rate:.1f}% (+{divergence_pp:.1f}pp) — consider enabling ML",
+            )
+    return RuleResult(fired=False)
+
+
+def eval_paper_live_divergence(m: ProjectMetrics) -> RuleResult:
+    """Alert when paper trading significantly outperforms live."""
+    if m.paper_pnl is not None and m.live_pnl is not None:
+        if m.total_capital and m.total_capital > 0:
+            paper_roi = (m.paper_pnl / m.total_capital) * 100
+            live_roi = (m.live_pnl / m.total_capital) * 100
+            if paper_roi - live_roi > 5:
+                return RuleResult(
+                    fired=True, decision_type="PIVOT", confidence=65,
+                    reason=f"Paper ROI {paper_roi:.1f}% vs live ROI {live_roi:.1f}% — execution slippage or fear-based overrides likely",
+                )
+    return RuleResult(fired=False)
+
+
 def eval_change_penalty(m: ProjectMetrics) -> RuleResult:
     """Suppress decisions if one was recently executed (cost of change)."""
     # If a decision was executed less than 48h ago, don't fire new ones
@@ -214,6 +378,19 @@ ALL_RULES: list[Rule] = [
     # Acciones
     Rule(id="ACC_CIRCUIT_BREAKER", name="Circuit breaker active", applies_to=["acciones"], evaluate=eval_circuit_breaker, cooldown_hours=1),
     Rule(id="ACC_DAILY_LOSS", name="Daily loss > 5%", applies_to=["acciones"], evaluate=eval_daily_loss, cooldown_hours=24),
+    Rule(id="ACC_RECONCILIATION", name="Reconciliation inconsistencies", applies_to=["acciones"], evaluate=eval_reconciliation, cooldown_hours=1),
+    Rule(id="ACC_RISK_TIGHTEN", name="Tighten risk on low score", applies_to=["acciones"], evaluate=eval_risk_tighten, cooldown_hours=6),
+    Rule(id="ACC_CB_RESET", name="Circuit breaker recovery", applies_to=["acciones"], evaluate=eval_cb_reset, cooldown_hours=24),
+    # Acciones Stocks
+    Rule(id="ACC_STOCKS_MARKET_HOURS", name="Stocks open outside market hours", applies_to=["acciones"], evaluate=eval_stocks_market_hours, cooldown_hours=1),
+    Rule(id="ACC_STOCKS_CONCENTRATION", name="Stocks > 70% of capital", applies_to=["acciones"], evaluate=eval_stocks_concentration, cooldown_hours=12),
+    Rule(id="ACC_CRYPTO_STOCKS_DIVERGENCE", name="Crypto/stocks PnL divergence", applies_to=["acciones"], evaluate=eval_crypto_stocks_divergence, cooldown_hours=48),
+    # Acciones Strategies
+    Rule(id="ACC_STRATEGY_UNDERPERFORM", name="Strategy underperforming", applies_to=["acciones"], evaluate=eval_strategy_underperform, cooldown_hours=72),
+    Rule(id="ACC_STRATEGY_OVERPERFORM", name="Deactivated strategy overperforming", applies_to=["acciones"], evaluate=eval_strategy_overperform, cooldown_hours=72),
+    # Acciones ML & Paper
+    Rule(id="ACC_ML_SHADOW_DIVERGENCE", name="ML shadow outperforms live", applies_to=["acciones"], evaluate=eval_ml_shadow_divergence, cooldown_hours=168),
+    Rule(id="ACC_PAPER_LIVE_DIVERGENCE", name="Paper outperforms live", applies_to=["acciones"], evaluate=eval_paper_live_divergence, cooldown_hours=168),
     # Libro
     Rule(id="LIB_REVENUE", name="Revenue per book > $5", applies_to=["libro"], evaluate=eval_libro_revenue, cooldown_hours=720),
     Rule(id="LIB_COMPLIANCE", name="KDP compliance HIGH", applies_to=["libro"], evaluate=eval_libro_compliance, cooldown_hours=24),

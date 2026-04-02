@@ -11,6 +11,11 @@ def calculate_portfolio_score(
     items_processed: int | None,
     false_positive_rate: float | None,
     focus_hours_weekly: float | None = None,
+    # Phase 2: enrichment parameters
+    reconciliation_ok: bool = True,
+    asset_class_count: int = 1,
+    strategy_diversity: int | None = None,
+    pending_approvals_count: int = 0,
 ) -> float:
     """
     Composite score: health(15%) + financial(35%) + momentum(25%) + efficiency(15%) + risk(10%)
@@ -75,6 +80,22 @@ def calculate_portfolio_score(
         # More than 5h/week on a single MVP is expensive
         focus_penalty = max(0, (focus_hours_weekly - 2) * 3)  # 3 points per hour above 2h
         score -= focus_penalty
+
+    # Reconciliation penalty: data integrity issues severely impact health
+    if not reconciliation_ok:
+        score -= 30
+
+    # Diversification bonus: multiple asset classes active and healthy
+    if asset_class_count > 1:
+        score += 5
+
+    # Strategy diversity bonus: more active strategies = better risk spread
+    if strategy_diversity is not None and strategy_diversity > 1:
+        score += min(5, (strategy_diversity - 1) * 2)
+
+    # Approval backlog penalty: too many pending approvals = operational bottleneck
+    if pending_approvals_count > 5:
+        score -= 10
 
     return round(max(0, min(100, score)), 1)
 

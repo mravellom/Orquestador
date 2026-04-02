@@ -12,6 +12,7 @@ from app.connectors.ideas import IdeasConnector
 from app.connectors.casas import CasasConnector
 from app.database import async_session
 from app.models.metric_snapshot import MetricSnapshot
+from app.models.strategy_snapshot import StrategySnapshot
 from app.models.project import Project
 
 logger = structlog.get_logger()
@@ -99,10 +100,15 @@ class FiscalAgent(BaseAgent):
                         active_users=metrics.active_users,
                         items_processed=metrics.items_processed,
                         false_positive_rate=metrics.false_positive_rate,
+                        crypto_pnl_usd=metrics.crypto_pnl_usd,
+                        stocks_pnl_usd=metrics.stocks_pnl_usd,
                         raw_data=metrics.raw_data,
                     )
                     session.add(snapshot)
                     await session.commit()
+
+                # Persist per-strategy snapshots (Acciones only)
+                await self._persist_strategy_snapshots(project.id, metrics.raw_data)
 
                 await self.publish("metrics_collected", {
                     "project_slug": project.slug,
@@ -131,3 +137,43 @@ class FiscalAgent(BaseAgent):
 
             except Exception as e:
                 logger.error("Failed to collect metrics", project=project.slug, error=str(e))
+
+    async def _persist_strategy_snapshots(self, project_id: int, raw_data: dict):
+        """Save a StrategySnapshot row for each strategy found in raw_data."""
+        strategies = raw_data.get("strategies", [])
+        per_strat = raw_data.get("per_strategy_analytics", [])
+
+        if not isinstance(strategies, list) or not strategies:
+            return
+
+        # Build analytics lookup by strategy id
+        analytics_by_id: dict[int, dict] = {}
+        if isinstance(per_strat, list):
+            for a in per_strat:
+                sid = a.get("strategy_id") or a.get("id")
+                if sid is not None:
+                    analytics_by_id[sid] = a
+
+        async with async_session() as session:
+            for s in strategies:
+                sid = s.get("id")
+                if sid is None:
+                    continue
+
+                a = analytics_by_id.get(sid, {})
+                snap = StrategySnapshot(
+                    project_id=project_id,
+                    strategy_id=sid,
+                    strategy_name=s.get("name", ""),
+                    is_active=s.get("is_active", True),
+                    asset_class=s.get("asset_class"),
+                    win_rate_pct=a.get("win_rate") or a.get("win_rate_pct"),
+                    pnl_usd=a.get("total_pnl") or a.get("pnl_usd"),
+                    trades_count=a.get("total_trades") or a.get("trades_count"),
+                    sharpe_ratio=a.get("sharpe_ratio"),
+                )
+                session.add(snap)
+
+            await session.commit()
+
+        logger.info("Strategy snapshots saved", project_id=project_id, count=len(strategies))

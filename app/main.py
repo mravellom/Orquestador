@@ -24,6 +24,8 @@ async def lifespan(app: FastAPI):
     from app.agents.estratega import EstrategaAgent
     from app.agents.executor import ExecutorAgent
     from app.agents.reporter import ReporterAgent
+    from app.agents.approver import ApproverAgent
+    from app.connectors.acciones_ws import AccionesWebSocketManager
 
     # Create tables
     async with engine.begin() as conn:
@@ -37,6 +39,7 @@ async def lifespan(app: FastAPI):
         EstrategaAgent(),
         ExecutorAgent(),
         ReporterAgent(),
+        ApproverAgent(),
     ]
 
     for agent in agents:
@@ -45,12 +48,19 @@ async def lifespan(app: FastAPI):
 
     logger.info("All agents started", count=len(agents))
 
+    # Start Acciones WebSocket manager (opt-in, non-blocking)
+    ws_manager = AccionesWebSocketManager()
+    ws_task = asyncio.create_task(ws_manager.start(), name="acciones-ws")
+    _agent_tasks.append(ws_task)
+
     yield
 
     # Shutdown
     logger.info("Stopping agents")
     for agent in agents:
         await agent.stop()
+
+    await ws_manager.stop()
 
     for task in _agent_tasks:
         task.cancel()
