@@ -13,7 +13,7 @@ class StrategySnapshot(Base):
     project_id: Mapped[int] = mapped_column(Integer, ForeignKey("projects.id"), nullable=False)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    strategy_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False)
     strategy_name: Mapped[str] = mapped_column(String(100), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     asset_class: Mapped[str | None] = mapped_column(String(20), nullable=True)
